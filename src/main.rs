@@ -1,5 +1,9 @@
+use clap::Parser;
 use std::{
     collections::HashSet,
+    fs,
+    io::{self, Read},
+    path::PathBuf,
     process::exit,
     sync::{mpsc, Arc, Mutex},
     thread,
@@ -73,23 +77,56 @@ where
     }
 }
 
-fn main() {
+/// Simple program to greet a person
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Input file to parse (uses stdin by default)
+    #[arg(short, long)]
+    input_file: Option<PathBuf>,
+
+    /// Timeout for the computation
+    #[arg(short, long)]
+    timeout: Option<humantime::Duration>,
+
+    /// Don't show the values
+    #[arg(long)]
+    no_values: bool,
+}
+
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
     use text_io::read;
 
-    let bag_size = read!();
+    let mut stream = if let Some(path) = args.input_file {
+        let file = fs::File::open(path)?;
+        let reader = io::BufReader::new(file);
+        let stream = reader.bytes().map(Result::unwrap);
+        Box::new(stream) as Box<dyn Iterator<Item = u8>>
+    } else {
+        let stream = io::stdin().bytes().map(Result::unwrap);
+        Box::new(stream) as Box<dyn Iterator<Item = u8>>
+    };
+
+    let bin_capacity: u32 = read!("{}", &mut stream);
     let mut weights = Vec::new();
-    while let nonzero @ 1.. = read!() {
+    while let nonzero @ 1.. = read!("{}", &mut stream) {
         weights.push(nonzero)
     }
 
     let mutex = Arc::new(Mutex::new(None));
     let other_fit = mutex.clone();
     let (tx, rx) = mpsc::channel();
-    let timeout = Duration::from_micros(100);
 
     let timeout_thread = thread::spawn(move || {
-        if rx.recv_timeout(timeout).is_err() {
-            println!("c Timed out");
+        if let Some(timeout) = args.timeout {
+            if rx.recv_timeout(timeout.into()).is_err() {
+                println!("c Timed out after {timeout}");
+            }
+        } else {
+            // wait for the main thread to finish computation
+            let _ = rx.recv();
         }
 
         let best_fit: Option<Vec<Vec<_>>> = other_fit.lock().unwrap().take();
@@ -97,14 +134,16 @@ fn main() {
             Some(best_fit) => {
                 println!("s SAT");
 
-                for row in best_fit {
-                    println!(
-                        "v {}",
-                        row.iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    );
+                if !args.no_values {
+                    for row in best_fit {
+                        println!(
+                            "v {}",
+                            row.iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        );
+                    }
                 }
             }
             None => {
@@ -120,7 +159,7 @@ fn main() {
     loop {
         println!("c Fitting to {} bins", max_bins);
         let current_fit: Option<Vec<Vec<_>>> =
-            Fitter::new(weights.clone(), vec![bag_size; max_bins])
+            Fitter::new(weights.clone(), vec![bin_capacity; max_bins])
                 .fit()
                 .map(|fit| fit.into_iter().filter(|row| !row.is_empty()).collect());
 
@@ -138,4 +177,6 @@ fn main() {
 
     let _ = tx.send(());
     let _ = timeout_thread.join();
+
+    anyhow::Ok(())
 }
