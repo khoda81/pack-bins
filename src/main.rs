@@ -1,7 +1,10 @@
-use core::time;
-use std::{collections::HashSet, process::exit, sync::mpsc, thread};
-
-use rand::Rng;
+use std::{
+    collections::HashSet,
+    process::exit,
+    sync::{mpsc, Arc, Mutex},
+    thread,
+    time::Duration,
+};
 
 pub struct Fitter<T> {
     weights: Vec<T>,
@@ -17,7 +20,7 @@ where
         weights.sort();
 
         Self {
-            bins: (0..bin_capacities.len()).map(|_| Vec::new()).collect(),
+            bins: vec![Vec::new(); bin_capacities.len()],
             bin_capacities,
             weights,
         }
@@ -62,67 +65,77 @@ where
         let total_weight: T = self.weights.iter().copied().sum();
         let total_size: T = self.bin_capacities.iter().copied().sum();
 
-        (total_weight <= total_size && self.fit_helper()).then_some(self.bins)
+        if total_weight <= total_size && self.fit_helper() {
+            Some(self.bins)
+        } else {
+            None
+        }
     }
 }
 
 fn main() {
     use text_io::read;
-    let mut weights = vec![];
+
+    let bag_size = read!();
+    let mut weights = Vec::new();
     while let nonzero @ 1.. = read!() {
         weights.push(nonzero)
     }
 
-    let mut thread_rng = rand::thread_rng();
-    for _ in 0..500 {
-        let random_item = thread_rng.gen_range(200..=300);
-        weights.push(random_item);
-    }
+    let mutex = Arc::new(Mutex::new(None));
+    let other_fit = mutex.clone();
+    let (tx, rx) = mpsc::channel();
+    let timeout = Duration::from_micros(100);
 
-    let bag_size = 1024;
+    let timeout_thread = thread::spawn(move || {
+        if rx.recv_timeout(timeout).is_err() {
+            println!("c Timed out");
+        }
 
-    thread::spawn(move || {
-        thread::sleep(time::Duration::from_millis(100));
+        let best_fit: Option<Vec<Vec<_>>> = other_fit.lock().unwrap().take();
+        match best_fit {
+            Some(best_fit) => {
+                println!("s SAT");
+
+                for row in best_fit {
+                    println!(
+                        "v {}",
+                        row.iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+                }
+            }
+            None => {
+                println!("s UNSAT");
+            }
+        }
 
         exit(0);
     });
 
-    let fitter = Fitter::new(weights.clone(), vec![bag_size; weights.len()]);
-    let fit = match fitter.fit() {
-        Some(fit) => {
-            println!("s SAT");
-            fit
-        }
-
-        None => {
-            println!("s UNSAT");
-            return;
-        }
-    };
-
-    let mut best_fit: Vec<_> = fit.into_iter().filter(|row| !row.is_empty()).collect();
+    let mut max_bins = weights.len();
 
     loop {
-        for row in best_fit.iter() {
-            print!("c ");
-            for cell in row.iter() {
-                print!("{cell} ");
-            }
+        println!("c Fitting to {} bins", max_bins);
+        let current_fit: Option<Vec<Vec<_>>> =
+            Fitter::new(weights.clone(), vec![bag_size; max_bins])
+                .fit()
+                .map(|fit| fit.into_iter().filter(|row| !row.is_empty()).collect());
 
-            println!();
-        }
-
-        let bin_count = best_fit.len();
-
-        if bin_count == 0 {
+        if let Some(current_fit) = current_fit {
+            max_bins = current_fit.len().saturating_sub(1);
+            let _ = mutex.lock().unwrap().insert(current_fit);
+        } else {
             break;
         }
 
-        let fitter = Fitter::new(weights.clone(), vec![bag_size; bin_count - 1]);
-
-        best_fit = match fitter.fit() {
-            Some(fit) => fit.into_iter().filter(|row| !row.is_empty()).collect(),
-            None => break,
+        if max_bins == 0 {
+            break;
         }
     }
+
+    let _ = tx.send(());
+    let _ = timeout_thread.join();
 }
