@@ -2,7 +2,7 @@ use clap::Parser;
 use std::io::Read;
 use std::{fs, io, path, process, sync, thread};
 
-/// Simple program to greet a person
+/// A backtracking solution to bin packing problem
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -14,9 +14,13 @@ struct Args {
     #[arg(short, long)]
     timeout: Option<humantime::Duration>,
 
-    /// Don't show the values
-    #[arg(long)]
-    no_values: bool,
+    /// Show the values
+    #[arg(short, long)]
+    values: bool,
+
+    /// Try to minimize the number of bins to use
+    #[arg(short, long)]
+    minimize_bins: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -59,7 +63,7 @@ fn main() -> anyhow::Result<()> {
             Some(best_fit) => {
                 println!("s SAT");
 
-                if !args.no_values {
+                if args.values {
                     for row in best_fit {
                         println!(
                             "v {}",
@@ -83,6 +87,7 @@ fn main() -> anyhow::Result<()> {
 
     loop {
         println!("c Fitting to {} bins", max_bins);
+        // find a fit
         let current_fit: Option<Vec<Vec<_>>> =
             fitter::Fitter::new(weights.clone(), vec![bin_capacity; max_bins])
                 .fit()
@@ -90,12 +95,14 @@ fn main() -> anyhow::Result<()> {
 
         if let Some(current_fit) = current_fit {
             max_bins = current_fit.len().saturating_sub(1);
+
+            // send the solution through mutex
             let _ = mutex.lock().unwrap().insert(current_fit);
         } else {
             break;
         }
 
-        if max_bins == 0 {
+        if max_bins == 0 || !args.minimize_bins {
             break;
         }
     }
