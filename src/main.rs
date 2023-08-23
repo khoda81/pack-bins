@@ -23,60 +23,74 @@ struct Args {
     minimize_bins: bool,
 }
 
+fn parse_input(stream: impl Read) -> anyhow::Result<(u32, Vec<u32>)> {
+    use text_io::try_read;
+
+    let mut stream = stream.bytes().map(Result::unwrap);
+    let bin_capacity = try_read!("{}", &mut stream)?;
+    let mut weights = Vec::new();
+    while let nonzero @ 1.. = try_read!("{}", &mut stream)? {
+        weights.push(nonzero)
+    }
+
+    Ok((bin_capacity, weights))
+}
+
+fn print_values(best_fit: Vec<fitter::Bin<u32>>) {
+    best_fit.into_iter().for_each(|row| {
+        let row = row
+            .items()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        println!("v {}", row);
+    });
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    use text_io::read;
-
-    let mut stream = if let Some(path) = args.input_file {
+    let stream: Box<dyn Read> = if let Some(path) = args.input_file {
         let file = fs::File::open(path)?;
         let reader = io::BufReader::new(file);
-        let stream = reader.bytes().map(Result::unwrap);
-        Box::new(stream) as Box<dyn Iterator<Item = u8>>
+
+        Box::new(reader)
     } else {
-        let stream = io::stdin().bytes().map(Result::unwrap);
-        Box::new(stream) as Box<dyn Iterator<Item = u8>>
+        Box::new(io::stdin())
     };
 
-    let bin_capacity: u32 = read!("{}", &mut stream);
-    let mut weights = Vec::new();
-    while let nonzero @ 1.. = read!("{}", &mut stream) {
-        weights.push(nonzero)
-    }
+    let (bin_capacity, weights) = parse_input(stream)?;
 
     let mutex = sync::Arc::new(sync::Mutex::new(None));
     let other_mutex = mutex.clone();
     let (tx, rx) = sync::mpsc::channel();
 
     let timeout_thread = thread::spawn(move || {
+        let mut timed_out = false;
+
         if let Some(timeout) = args.timeout {
             if rx.recv_timeout(timeout.into()).is_err() {
                 println!("c Timed out after {timeout}");
+                timed_out = true;
             }
         } else {
             // wait for the main thread to finish computation
             let _ = rx.recv();
         }
 
-        let best_fit: Option<Vec<Vec<_>>> = other_mutex.lock().unwrap().take();
+        let best_fit = other_mutex.lock().unwrap().take();
         match best_fit {
+            None if timed_out => println!("s UNKNOWN"),
+            None => println!("s UNSAT"),
+
             Some(best_fit) => {
                 println!("s SAT");
 
                 if args.values {
-                    for row in best_fit {
-                        println!(
-                            "v {}",
-                            row.iter()
-                                .map(ToString::to_string)
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        );
-                    }
+                    print_values(best_fit);
                 }
-            }
-            None => {
-                println!("s UNSAT");
             }
         }
 
@@ -86,12 +100,16 @@ fn main() -> anyhow::Result<()> {
     let mut max_bins = weights.len();
 
     loop {
-        println!("c Fitting to {} bins", max_bins);
+        println!("c Trying to fit in {max_bins} bins");
+
         // find a fit
-        let current_fit: Option<Vec<Vec<_>>> =
-            fitter::Fitter::new(weights.clone(), vec![bin_capacity; max_bins])
-                .fit()
-                .map(|fit| fit.into_iter().filter(|row| !row.is_empty()).collect());
+        let current_fit = fitter::Fitter::new(weights.clone(), vec![bin_capacity; max_bins])
+            .fit()
+            .map(|fit| {
+                fit.into_iter()
+                    .filter(|row| !row.is_empty())
+                    .collect::<Vec<_>>()
+            });
 
         if let Some(current_fit) = current_fit {
             max_bins = current_fit.len().saturating_sub(1);
