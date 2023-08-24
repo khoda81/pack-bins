@@ -50,7 +50,7 @@ enum State {
 }
 struct StackItem<T> {
     searched_bins: collections::HashSet<T>,
-    current_bin: usize,
+    bin_idx: usize,
     state: State,
 }
 
@@ -112,7 +112,7 @@ where
 
         self.stack = vec![StackItem {
             searched_bins: collections::HashSet::new(),
-            current_bin: 0,
+            bin_idx: 0,
             state: State::Try,
         }];
 
@@ -143,55 +143,48 @@ where
     type Item = ();
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut stack_item = self.stack.pop()?;
+        let mut current = self.stack.pop()?;
 
-        match stack_item.state {
+        match current.state {
             State::Backtrack => {
-                let current_item = self.bins[stack_item.current_bin].pop().unwrap();
+                let current_item = self.bins[current.bin_idx - 1].pop().unwrap();
+
                 self.items.push_back(current_item);
+                current.state = State::Try;
 
-                stack_item.state = State::Try;
-                stack_item.current_bin += 1;
-
-                self.stack.push(stack_item);
+                self.stack.push(current);
             }
 
-            State::Try => match self.bins.get_mut(stack_item.current_bin) {
-                None => {}
+            State::Try => {
+                if let Some(bin) = self.bins.get_mut(current.bin_idx) {
+                    let item = self.items.pop_back()?;
+                    current.bin_idx += 1;
 
-                Some(bin) => {
-                    let current_item = self.items.pop_back()?;
-                    match bin.try_push(current_item) {
-                        Some(current_item) => {
-                            self.items.push_back(current_item);
-
-                            stack_item.state = State::Try;
-                            stack_item.current_bin += 1;
+                    match bin.try_push(item) {
+                        Some(item) => {
+                            self.items.push_back(item);
+                            self.stack.push(current);
                         }
 
                         None => {
-                            if stack_item.searched_bins.insert(bin.capacity.clone()) {
-                                stack_item.state = State::Backtrack;
-                                self.stack.push(stack_item);
+                            if current.searched_bins.insert(bin.capacity.clone()) {
+                                current.state = State::Backtrack;
+                                self.stack.push(current);
 
-                                stack_item = StackItem {
+                                current = StackItem {
                                     searched_bins: collections::HashSet::new(),
-                                    current_bin: 0,
+                                    bin_idx: 0,
                                     state: State::Try,
                                 };
+                                self.stack.push(current)
                             } else {
-                                let current_item = bin.pop().unwrap();
-                                self.items.push_back(current_item);
-
-                                stack_item.state = State::Try;
-                                stack_item.current_bin += 1;
+                                self.items.push_back(bin.pop().unwrap());
+                                self.stack.push(current);
                             }
                         }
                     };
-
-                    self.stack.push(stack_item);
-                }
-            },
+                };
+            }
         };
 
         Some(())
