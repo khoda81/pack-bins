@@ -38,7 +38,11 @@
                     "kind": "bin"
                 }
             },
-            "args": [],
+            "args": [
+                "-i",
+                "${workspaceFolder}\\tests\\fit_4_into_10.txt",
+                "-mv",
+            ],
             "cwd": "${workspaceFolder}"
         },
         {
