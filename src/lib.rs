@@ -3,7 +3,7 @@ use std::{collections, time};
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Bin<T> {
     capacity: T,
-    items: collections::LinkedList<T>,
+    items: Vec<T>,
 }
 
 impl<T> Bin<T>
@@ -13,23 +13,23 @@ where
     pub fn new(capacity: T) -> Self {
         Self {
             capacity,
-            items: collections::LinkedList::new(),
+            items: Vec::new(),
         }
     }
 
-    pub fn try_push(&mut self, item: T) -> Option<T> {
+    pub fn try_push(&mut self, item: T) -> Result<&mut T, T> {
         if self.capacity >= item {
             self.capacity -= item.clone();
-            self.items.push_back(item);
+            self.items.push(item);
 
-            None
+            Ok(self.items.last_mut().unwrap())
         } else {
-            Some(item)
+            Err(item)
         }
     }
 
     pub fn pop(&mut self) -> Option<T> {
-        self.items.pop_back().map(|item| {
+        self.items.pop().map(|item| {
             self.capacity += item.clone();
             item
         })
@@ -39,7 +39,7 @@ where
         self.items.is_empty()
     }
 
-    pub fn items(&self) -> &collections::LinkedList<T> {
+    pub fn items(&self) -> &Vec<T> {
         &self.items
     }
 }
@@ -48,17 +48,17 @@ enum State {
     Try,
     Backtrack,
 }
-struct StackItem<T> {
+struct StackState<T> {
     searched_bins: collections::HashSet<T>,
     bin_idx: usize,
     state: State,
 }
 
 pub struct Fitter<T> {
-    items: collections::LinkedList<T>,
+    items: Vec<T>,
     bins: Vec<Bin<T>>,
 
-    stack: Vec<StackItem<T>>,
+    state_stack: Vec<StackState<T>>,
 }
 
 impl<T> Fitter<T>
@@ -75,56 +75,26 @@ where
 
         Self {
             bins: bin_capacities.into_iter().map(Bin::new).collect(),
-            items: collections::LinkedList::from_iter(items),
-            stack: Vec::new(),
+            items,
+            state_stack: vec![StackState {
+                searched_bins: collections::HashSet::new(),
+                bin_idx: 0,
+                state: State::Try,
+            }],
         }
-    }
-
-    pub fn fit_recurse(&mut self) -> Option<()> {
-        let mut current_item = self.items.pop_back()?;
-        let mut searched_sizes = collections::HashSet::new();
-
-        // try
-        for bag_idx in 0..self.bins.len() {
-            current_item = match self.bins[bag_idx].try_push(current_item) {
-                Some(item) => item,
-
-                None => {
-                    if searched_sizes.insert(self.bins[bag_idx].capacity.clone()) {
-                        // recurse
-                        self.fit_recurse()?;
-                    }
-
-                    // backtrack
-                    self.bins[bag_idx].pop().unwrap()
-                }
-            }
-        }
-
-        self.items.push_back(current_item);
-
-        Some(())
     }
 
     pub fn fit(mut self) -> Option<Vec<Bin<T>>> {
         let total_weight: T = self.items.iter().sum();
         let total_size: T = self.bins.iter().map(|bin| &bin.capacity).sum();
 
-        self.stack = vec![StackItem {
-            searched_bins: collections::HashSet::new(),
-            bin_idx: 0,
-            state: State::Try,
-        }];
-
         if total_weight <= total_size && {
             let start = time::Instant::now();
-            // self.fit_recurse();
-            // let num_iters = 1;
             let num_iters = self.count();
             let dur = start.elapsed();
             println!(
                 "c {num_iters} iterations in {dur:?} ({:?} per iteration)",
-                dur / num_iters.try_into().unwrap()
+                dur / num_iters as u32
             );
 
             self.items.is_empty()
@@ -143,48 +113,58 @@ where
     type Item = ();
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut current = self.stack.pop()?;
+        let current = self.state_stack.last_mut()?;
 
         match current.state {
             State::Backtrack => {
-                let current_item = self.bins[current.bin_idx - 1].pop().unwrap();
-
-                self.items.push_back(current_item);
                 current.state = State::Try;
 
-                self.stack.push(current);
+                self.items
+                    .push(self.bins[current.bin_idx - 1].pop().unwrap());
             }
 
-            State::Try => {
-                if let Some(bin) = self.bins.get_mut(current.bin_idx) {
-                    let item = self.items.pop_back()?;
-                    current.bin_idx += 1;
+            State::Try => match self.bins.get_mut(current.bin_idx) {
+                None => drop(self.state_stack.pop()),
 
-                    match bin.try_push(item) {
-                        Some(item) => {
-                            self.items.push_back(item);
-                            self.stack.push(current);
+                Some(bin) => match self.items.pop() {
+                    None => {
+                        self.state_stack.pop();
+                        return None;
+                    }
+
+                    Some(item) => match bin.try_push(item) {
+                        Err(item) => {
+                            current.bin_idx += 1;
+                            self.items.push(item)
                         }
 
-                        None => {
-                            if current.searched_bins.insert(bin.capacity.clone()) {
-                                current.state = State::Backtrack;
-                                self.stack.push(current);
-
-                                current = StackItem {
-                                    searched_bins: collections::HashSet::new(),
-                                    bin_idx: 0,
-                                    state: State::Try,
-                                };
-                                self.stack.push(current)
-                            } else {
-                                self.items.push_back(bin.pop().unwrap());
-                                self.stack.push(current);
+                        Ok(_) => match current.searched_bins.insert(bin.capacity.clone()) {
+                            false => {
+                                current.bin_idx += 1;
+                                self.items.push(bin.pop().unwrap())
                             }
-                        }
-                    };
-                };
-            }
+
+                            true => {
+                                current.state = State::Backtrack;
+
+                                let mut bin_idx = 0;
+                                if let Some(next_item) = self.items.last_mut() {
+                                    if bin.items.last().unwrap() <= next_item {
+                                        bin_idx = current.bin_idx;
+                                    }
+                                }
+
+                                current.bin_idx += 1;
+                                self.state_stack.push(StackState {
+                                    searched_bins: collections::HashSet::new(),
+                                    bin_idx,
+                                    state: State::Try,
+                                })
+                            }
+                        },
+                    },
+                },
+            },
         };
 
         Some(())
