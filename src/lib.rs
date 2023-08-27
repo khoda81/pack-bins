@@ -1,4 +1,4 @@
-use std::{cmp, hash, iter, ops};
+use std::{cmp, hash, iter, ops, time};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Bin<T> {
@@ -160,5 +160,67 @@ where
         }
 
         Some(())
+    }
+
+    pub fn solve_until(&mut self, mut predicate: impl FnMut() -> bool) -> bool {
+        let initial_len = self.items.len();
+        let print_interval = time::Duration::from_millis(200);
+
+        let mut solved_amount = 0.;
+        let mut prev_print_amount = solved_amount;
+        let mut min_items = initial_len;
+        let mut next_print_time = time::Instant::now() + print_interval;
+
+        let mut num_iters = 0;
+        let start = time::Instant::now();
+
+        let mut solving = predicate();
+
+        while solving {
+            num_iters += 1;
+            if !self.step() {
+                break;
+            }
+
+            // print!("\x1b[2J\x1b[H"); // clear screen
+            // println!(
+            //     "c {}",
+            //     self
+            //         .items
+            //         .iter()
+            //         .map(ToString::to_string)
+            //         .collect::<Vec<_>>()
+            //         .join(" ")
+            // );
+
+            // print_solution(&self.bins);
+            // io::stdin().read_line(&mut String::new())?;
+
+            if self.items.len() < min_items {
+                min_items = self.items.len();
+                let m = min_items as f64;
+                let l = initial_len as f64;
+                solved_amount = 1. - (m * (l - 1.) / l + 1.).log(l);
+            };
+
+            if time::Instant::now() > next_print_time && prev_print_amount != solved_amount {
+                // print
+                next_print_time = time::Instant::now() + print_interval;
+                prev_print_amount = solved_amount;
+                log::info!("c {:.2}% solved (items={min_items})", solved_amount * 100.);
+            }
+
+            solving = predicate();
+        }
+
+        let dur = start.elapsed();
+        if num_iters > 0 {
+            let time_per_iteration = dur / num_iters;
+            log::debug!("{num_iters} iterations in {dur:?} ({time_per_iteration:?} per iteration)",);
+        } else {
+            log::warn!("No iterations");
+        }
+
+        solving
     }
 }

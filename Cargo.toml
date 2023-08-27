@@ -8,6 +8,9 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.75"
 clap = { version = "4.3.23", features = ["derive"] }
+clap-verbosity-flag = "2.0.1"
+env_logger = "0.10.0"
 humantime = "2.1.0"
+log = "0.4.20"
 rand = "0.8.5"
 text_io = "0.1.12"

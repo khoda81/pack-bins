@@ -41,7 +41,10 @@
             "args": [
                 "-i",
                 "${workspaceFolder}\\tests\\simple_heavy.txt",
-                "-mv",
+                "-m",
+                "-t",
+                "450us",
+                "-vvvv",
             ],
             "cwd": "${workspaceFolder}"
         },
