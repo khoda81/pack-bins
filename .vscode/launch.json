@@ -40,7 +40,7 @@
             },
             "args": [
                 "-i",
-                "${workspaceFolder}\\tests\\fit_4_into_10.txt",
+                "${workspaceFolder}\\tests\\simple_heavy.txt",
                 "-mv",
             ],
             "cwd": "${workspaceFolder}"

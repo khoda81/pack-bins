@@ -1,14 +1,14 @@
-use std::{collections, time};
+use std::{cmp, hash, iter, ops};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Bin<T> {
-    capacity: T,
-    items: Vec<T>,
+    pub capacity: T,
+    pub items: Vec<T>,
 }
 
 impl<T> Bin<T>
 where
-    T: Clone + std::cmp::PartialOrd + std::ops::SubAssign + std::ops::AddAssign,
+    T: Clone + cmp::PartialOrd + for<'a> ops::AddAssign<&'a T> + for<'a> ops::SubAssign<&'a T>,
 {
     pub fn new(capacity: T) -> Self {
         Self {
@@ -17,20 +17,18 @@ where
         }
     }
 
-    pub fn try_push(&mut self, item: T) -> Result<&mut T, T> {
-        if self.capacity >= item {
-            self.capacity -= item.clone();
-            self.items.push(item);
+    pub fn fits(&self, item: &T) -> bool {
+        &self.capacity >= item
+    }
 
-            Ok(self.items.last_mut().unwrap())
-        } else {
-            Err(item)
-        }
+    pub fn push(&mut self, item: T) {
+        self.capacity -= &item;
+        self.items.push(item);
     }
 
     pub fn pop(&mut self) -> Option<T> {
         self.items.pop().map(|item| {
-            self.capacity += item.clone();
+            self.capacity += &item;
             item
         })
     }
@@ -44,31 +42,51 @@ where
     }
 }
 
-enum State {
+// TODO: do we need both?
+impl<T: std::cmp::PartialOrd> PartialOrd for Bin<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        self.items.partial_cmp(&other.items)
+    }
+}
+impl<T: std::cmp::Ord + std::cmp::Eq> Ord for Bin<T> {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        self.items.cmp(&other.items)
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Action {
     Try,
     Backtrack,
 }
-struct StackState<T> {
-    searched_bins: collections::HashSet<T>,
-    bin_idx: usize,
-    state: State,
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct State<T> {
+    last_bin_capacity: Option<T>,
+    next_bin_idx: usize,
+    action: Action,
+}
+
+impl<T> Default for State<T> {
+    fn default() -> Self {
+        Self {
+            last_bin_capacity: Default::default(),
+            next_bin_idx: 0,
+            action: Action::Try,
+        }
+    }
 }
 
 pub struct Fitter<T> {
-    items: Vec<T>,
-    bins: Vec<Bin<T>>,
+    pub items: Vec<T>,
+    pub bins: Vec<Bin<T>>,
 
-    state_stack: Vec<StackState<T>>,
+    state_stack: Vec<State<T>>,
 }
 
 impl<T> Fitter<T>
 where
-    T: Ord
-        + Clone
-        + std::hash::Hash
-        + std::ops::SubAssign
-        + std::ops::AddAssign
-        + for<'a> std::iter::Sum<&'a T>,
+    T: Ord + Clone + hash::Hash + for<'a> iter::Sum<&'a T>,
+    T: for<'a> ops::AddAssign<&'a T> + for<'a> ops::SubAssign<&'a T>,
 {
     pub fn new(mut items: Vec<T>, bin_capacities: impl IntoIterator<Item = T>) -> Self {
         items.sort();
@@ -76,96 +94,70 @@ where
         Self {
             bins: bin_capacities.into_iter().map(Bin::new).collect(),
             items,
-            state_stack: vec![StackState {
-                searched_bins: collections::HashSet::new(),
-                bin_idx: 0,
-                state: State::Try,
-            }],
+            state_stack: vec![Default::default()],
         }
     }
 
-    pub fn fit(mut self) -> Option<Vec<Bin<T>>> {
-        let total_weight: T = self.items.iter().sum();
-        let total_size: T = self.bins.iter().map(|bin| &bin.capacity).sum();
-
-        if total_weight <= total_size && {
-            let start = time::Instant::now();
-            let num_iters = self.count();
-            let dur = start.elapsed();
-            println!(
-                "c {num_iters} iterations in {dur:?} ({:?} per iteration)",
-                dur / num_iters as u32
-            );
-
-            self.items.is_empty()
-        } {
-            Some(self.bins.into_iter().collect())
-        } else {
-            None
-        }
+    pub fn is_solved(&self) -> bool {
+        self.items.is_empty()
     }
-}
 
-impl<T> Iterator for &mut Fitter<T>
-where
-    T: Clone + Ord + std::hash::Hash + std::ops::SubAssign + std::ops::AddAssign,
-{
-    type Item = ();
+    pub fn step(&mut self) -> bool {
+        self.step_inner().is_some()
+    }
 
-    fn next(&mut self) -> Option<Self::Item> {
-        let current = self.state_stack.last_mut()?;
+    fn step_inner(&mut self) -> Option<()> {
+        let mut current = self.state_stack.pop()?;
 
-        match current.state {
-            State::Backtrack => {
-                current.state = State::Try;
+        let mut item = match current.action {
+            Action::Backtrack => self.bins[current.next_bin_idx - 1].pop().unwrap(),
+            Action::Try => self.items.pop()?,
+        };
 
-                self.items
-                    .push(self.bins[current.bin_idx - 1].pop().unwrap());
+        if let Some(prev_state) = self.state_stack.last() {
+            let current_bin_idx = prev_state.next_bin_idx - 1;
+            let prev_item = self.bins[current_bin_idx].items.last().unwrap();
+
+            if prev_item <= &item {
+                current.next_bin_idx = current.next_bin_idx.max(current_bin_idx)
+            }
+        }
+
+        loop {
+            let bin_idx = current.next_bin_idx;
+            current.next_bin_idx += 1;
+
+            if bin_idx >= self.bins.len() {
+                self.items.push(item);
+                return Some(());
             }
 
-            State::Try => match self.bins.get_mut(current.bin_idx) {
-                None => drop(self.state_stack.pop()),
+            if !self.bins[bin_idx].fits(&item) {
+                continue;
+            }
 
-                Some(bin) => match self.items.pop() {
-                    None => {
-                        self.state_stack.pop();
-                        return None;
-                    }
+            if current.last_bin_capacity.as_ref() == Some(&self.bins[bin_idx].capacity) {
+                continue;
+            };
 
-                    Some(item) => match bin.try_push(item) {
-                        Err(item) => {
-                            current.bin_idx += 1;
-                            self.items.push(item)
-                        }
+            let capacity = self.bins[bin_idx].capacity.clone();
+            self.bins[bin_idx].push(item);
+            if bin_idx >= 1 {
+                // check that current and previous bins are in order
+                if self.bins[bin_idx - 1] < self.bins[bin_idx] {
+                    item = self.bins[bin_idx].pop().unwrap();
+                    continue;
+                }
+            }
 
-                        Ok(_) => match current.searched_bins.insert(bin.capacity.clone()) {
-                            false => {
-                                current.bin_idx += 1;
-                                self.items.push(bin.pop().unwrap())
-                            }
+            current.last_bin_capacity = Some(capacity);
 
-                            true => {
-                                current.state = State::Backtrack;
-
-                                let mut bin_idx = 0;
-                                if let Some(next_item) = self.items.last_mut() {
-                                    if bin.items.last().unwrap() <= next_item {
-                                        bin_idx = current.bin_idx;
-                                    }
-                                }
-
-                                current.bin_idx += 1;
-                                self.state_stack.push(StackState {
-                                    searched_bins: collections::HashSet::new(),
-                                    bin_idx,
-                                    state: State::Try,
-                                })
-                            }
-                        },
-                    },
-                },
-            },
-        };
+            // item was put in a bin
+            current.action = Action::Backtrack;
+            self.state_stack.push(current);
+            self.state_stack.push(Default::default());
+            break;
+        }
 
         Some(())
     }
