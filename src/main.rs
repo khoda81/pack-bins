@@ -1,10 +1,14 @@
 #![feature(deadline_api)]
 #![feature(is_sorted)]
+#![feature(buf_read_has_data_left)]
 
 use clap::Parser;
-use std::io::Read;
-
-use std::{cmp, fs, io, path, time};
+use core::fmt;
+use std::{
+    cmp, error, fs,
+    io::{self, BufRead},
+    path, time,
+};
 
 /// A backtracking solution to bin packing problem
 #[derive(Parser, Debug)]
@@ -14,7 +18,7 @@ struct Args {
     #[arg(short, long)]
     input_file: Option<path::PathBuf>,
 
-    /// Timeout for the computation
+    /// Timeout for the solve
     #[arg(short, long)]
     timeout: Option<humantime::Duration>,
 
@@ -23,11 +27,15 @@ struct Args {
     values: bool,
 
     /// Try to minimize the number of bins to use
-    #[arg(short, long)]
-    minimize_bins: bool,
+    #[arg(long)]
+    minimize: bool,
 
     #[command(flatten)]
     verbose: clap_verbosity_flag::Verbosity<clap_verbosity_flag::WarnLevel>,
+
+    /// Read multiple inputs and parse one by one
+    #[arg(long)]
+    multi_mode: bool,
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -46,14 +54,48 @@ impl<S> SolutionState<S> {
     }
 }
 
-fn parse_input(stream: impl Read) -> anyhow::Result<(u32, Vec<u32>)> {
-    use text_io::try_read;
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+struct EOFError;
+impl fmt::Display for EOFError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("end of file reached while parsing")
+    }
+}
 
-    let mut stream = stream.bytes().map(Result::unwrap);
-    let bin_capacity = try_read!("{}", &mut stream)?;
+impl error::Error for EOFError {}
+
+fn parse_input(reader: &mut impl BufRead) -> anyhow::Result<(u32, Vec<u32>)> {
+    let mut line = String::new();
+    let bin_capacity = loop {
+        if !reader.has_data_left()? {
+            Err(EOFError)?;
+        }
+
+        reader.read_line(&mut line)?;
+        let trimmed_line = line.trim();
+        log::trace!("trimmed_line={trimmed_line:?}");
+        if !trimmed_line.is_empty() {
+            let count = trimmed_line.parse::<u32>()?;
+
+            log::trace!("count={count}");
+            break count;
+        }
+    };
+
     let mut weights = Vec::new();
-    while let nonzero @ 1.. = try_read!("{}", &mut stream)? {
-        weights.push(nonzero)
+    'outer: loop {
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+
+        for num in line.split_whitespace() {
+            log::trace!("num={num:?}");
+            let num = num.parse::<u32>()?;
+            if num == 0 {
+                break 'outer;
+            }
+
+            weights.push(num)
+        }
     }
 
     Ok((bin_capacity, weights))
@@ -75,54 +117,15 @@ fn print_solution(best_fit: &[fitter::Bin<u32>]) {
         });
 
     let is_sorted = best_fit.is_sorted_by_key(cmp::Reverse);
-    log::debug!("c Is sorted: {}", is_sorted);
+    log::debug!("Is sorted: {}", is_sorted);
 }
 
-fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-
-    let mut builder = env_logger::Builder::from_default_env();
-    builder.filter_level(args.verbose.log_level_filter());
-
-    // Custom formatting for log
-    builder.format(|buf, record| {
-        use std::io::Write;
-
-        let mut subtle = buf.style();
-        subtle.set_color(env_logger::fmt::Color::Black);
-        subtle.set_intense(true);
-
-        write!(buf, "c ")?;
-
-        write!(buf, "{}", subtle.value("["))?;
-        write!(buf, "{:<5}", buf.default_styled_level(record.level()))?;
-        write!(buf, " {}", buf.timestamp())?;
-        write!(buf, "{}", subtle.value("]"))?;
-
-        writeln!(buf, " {}", record.args())?;
-
-        Ok(())
-    });
-
-    // Initialize the logger
-    builder.init();
-
-    let stream: Box<dyn Read> = if let Some(path) = args.input_file {
-        let file = fs::File::open(path)?;
-        let reader = io::BufReader::new(file);
-
-        Box::new(reader)
-    } else {
-        Box::new(io::stdin())
-    };
-
+fn solve_single_input(stream: &mut impl BufRead, args: &Args) -> anyhow::Result<()> {
     let (bin_capacity, weights) = parse_input(stream)?;
     let solve_start = time::Instant::now();
     let deadline = args.timeout.map(|timeout| solve_start + timeout.into());
-
     let mut solution = SolutionState::Unknown;
     let mut max_bins = weights.len();
-
     'optimize: loop {
         log::info!("Trying to fit in {max_bins} bins");
 
@@ -155,12 +158,11 @@ fn main() -> anyhow::Result<()> {
 
             max_bins = bins.len().saturating_sub(1);
             solution = SolutionState::Solved(bins);
-            if max_bins > 0 && args.minimize_bins {
+            if max_bins > 0 && args.minimize {
                 continue 'optimize;
             }
         }
 
-        // unsolved
         solution.insert(SolutionState::Unsolvable);
         break;
     }
@@ -174,6 +176,56 @@ fn main() -> anyhow::Result<()> {
             if args.values {
                 print_solution(&solution);
             }
+        }
+    };
+
+    Ok(())
+}
+
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    let mut builder = env_logger::Builder::from_default_env();
+    builder.filter_level(args.verbose.log_level_filter());
+
+    // Custom formatting for log
+    builder.format(|buf, record| {
+        use std::io::Write;
+
+        let mut subtle = buf.style();
+        subtle.set_color(env_logger::fmt::Color::Black);
+        subtle.set_intense(true);
+
+        write!(buf, "c ")?;
+
+        write!(buf, "{}", subtle.value("["))?;
+        write!(buf, "{:<5}", buf.default_styled_level(record.level()))?;
+        write!(buf, " {}", buf.timestamp())?;
+        write!(buf, "{}", subtle.value("]"))?;
+
+        writeln!(buf, " {}", record.args())?;
+
+        Ok(())
+    });
+
+    // Initialize the logger
+    builder.init();
+
+    let mut stream: Box<dyn BufRead> = if let Some(path) = &args.input_file {
+        Box::new(io::BufReader::new(fs::File::open(path)?))
+    } else {
+        Box::new(io::stdin().lock())
+    };
+
+    loop {
+        if !stream.has_data_left()? {
+            break;
+        }
+
+        solve_single_input(&mut stream, &args)?;
+
+        if !args.multi_mode {
+            break;
         }
     }
 

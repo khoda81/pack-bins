@@ -207,7 +207,7 @@ where
                 // print
                 next_print_time = time::Instant::now() + print_interval;
                 prev_print_amount = solved_amount;
-                log::info!("c {:.2}% solved (items={min_items})", solved_amount * 100.);
+                log::info!("{:.2}% solved (items={min_items})", solved_amount * 100.);
             }
 
             solving = predicate();
